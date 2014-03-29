@@ -1,0 +1,134 @@
+#include <stdio.h>
+#include <unistd.h>			/* for sleep() */
+#include <stdlib.h>			/* for EXIT_* */
+#include <stdint.h>			/* for uintptr_t */
+#include <hw/inout.h>		/* for in*() and out*() functions */
+#include <sys/neutrino.h>	/* for ThreadCtl() */
+#include <sys/syspage.h>	/* for for cycles_per_second */
+#include <sys/mman.h>		/* for mmap_device_io() */
+#include <pthread.h>
+#include <time.h>
+#include <sys/netmgr.h>
+#include <math.h>                    // for fabsf()
+
+/* Variables used for addresses or port and ADC */
+
+#define BASE_ADDR 0x280
+#define PORT_LENGTH 1
+#define ADC_LSB_CTRL_ADD 0x280
+#define ADC_MSB_CTRL_ADD 0x281
+#define ADC_CHANNEL_CTRL_ADD 0x282
+#define ADC_GAIN_CTRL_ADD 0x283
+#define PORTA_ADD 0x288
+#define PORTB_ADD 0x289
+
+/* Definining voltage related values.  */
+#define MIN_VOLTAGE_VAL -5
+#define MAX_VOLTAGE_VAL 5
+#define VOLTAGE_RANGE_WARNING 0x04
+
+/* Macros used for easy understanding */
+// Signed 8-bit Type
+#ifndef INT8
+typedef signed char INT8;
+#endif
+
+// Signed 16-bit Type
+#ifndef INT16
+typedef signed int INT16;
+#endif
+
+// Signed 32-bit Type
+#ifndef INT32
+typedef signed long int INT32;
+#endif
+
+// Unsigned 8-bit Type
+#ifndef UINT8
+typedef unsigned char UINT8;
+#endif
+
+
+// Unsigned 16-bit Type
+#ifndef UINT16
+typedef unsigned int UINT16;
+#endif
+
+// Unsigned 32-bit Type
+#ifndef UINT32
+typedef unsigned long int UINT32;
+#endif
+//--------------------------------------------------------------
+
+// handler definition for adc and ports.
+uintptr_t command_LSB_ctrl_handle;
+uintptr_t command_MSB_ctrl_handle;
+uintptr_t adc_channel_ctrl_handle;
+uintptr_t adc_gain_ctrl_handle;
+uintptr_t adc_warning;
+
+uintptr_t gpio_port_ctrl;
+uintptr_t gpio_port_data;
+
+// Variabled for ADC data and voltage conversion
+INT8 LSB, MSB;
+INT16 data;
+float voltage;
+
+
+int main(void)
+{
+	int privity_err;
+	/* Root permissions to access the hardware */
+	privity_err = ThreadCtl(_NTO_TCTL_IO, NULL);
+	if (privity_err == -1) {
+	    fprintf(stderr, "can't get root permissions\n");
+	    return -1;
+	}
+    // Get a handle to the parallel port's Control register
+    command_LSB_ctrl_handle = mmap_device_io(PORT_LENGTH, ADC_LSB_CTRL_ADD);
+    command_MSB_ctrl_handle = mmap_device_io(PORT_LENGTH, ADC_MSB_CTRL_ADD);
+    adc_channel_ctrl_handle = mmap_device_io(PORT_LENGTH, ADC_CHANNEL_CTRL_ADD);
+    adc_gain_ctrl_handle = mmap_device_io(PORT_LENGTH, ADC_GAIN_CTRL_ADD);
+    gpio_port_ctrl = mmap_device_io(PORT_LENGTH, BASE_ADDR + 0x0B);
+    gpio_port_data = mmap_device_io(PORT_LENGTH, PORTA_ADD);
+    adc_warning = mmap_device_io(PORT_LENGTH, PORTB_ADD);
+
+    out8(gpio_port_ctrl, 0x00);
+
+    for(;;){
+       //Selecting the range
+       out8(adc_channel_ctrl_handle, 0x44);
+       out8(adc_gain_ctrl_handle, 0x01);
+
+       while(in8(adc_gain_ctrl_handle) & 0x20){}
+
+       //Starting the A/D Conversion
+       out8(command_LSB_ctrl_handle, 0x80);
+
+       //Wait for conversions to finish
+       while((in8(adc_gain_ctrl_handle) & 0x80) !=0){}
+
+       //Read the data
+       LSB = in8(command_LSB_ctrl_handle);
+       MSB = in8(command_MSB_ctrl_handle);
+       data = (MSB*256) + LSB;
+
+       //Converting the data
+       voltage = (float)(data*5)/32768;
+       if (voltage < MIN_VOLTAGE_VAL || voltage > MAX_VOLTAGE_VAL)     //check the voltage range
+       {
+            out8(adc_warning, VOLTAGE_RANGE_WARNING);     //Send the warning
+       }
+       else
+       {
+    	   int int_voltage = (int)fabsf(voltage);
+    	   int frac_voltage = (int)((fabsf(voltage) - int_voltage)*10);
+    	   unsigned short motor_position = (int_voltage*4) + (frac_voltage/2);   //Motor position to send to port connected to freescale board.
+    	   if ( voltage < (float)0 )
+    		   motor_position = motor_position | 0x80;
+ 	   	   //assigning digital signals to output port
+ 	   	   out8(gpio_port_data, motor_position);
+       }
+    }
+}
